@@ -13,6 +13,12 @@ from .fused_recurrent import (
 )
 from .fused_sigmoid_gating import fused_sigmoid_gating_delta_rule_update
 from .layernorm_guard import RMSNormGated
+from .qwen3_5_fused import (
+    fused_rms_norm_dual_gemm,
+    fused_rms_norm_gemm_silu,
+    fused_rms_norm_dual_gemm_single_kernel,
+    fused_rms_norm_gemm_silu_single_kernel,
+)
 
 __all__ = [
     "RMSNormGated",
@@ -20,4 +26,8 @@ __all__ = [
     "fused_recurrent_gated_delta_rule",
     "fused_recurrent_gated_delta_rule_packed_decode",
     "fused_sigmoid_gating_delta_rule_update",
+    "fused_rms_norm_dual_gemm",
+    "fused_rms_norm_gemm_silu",
+    "fused_rms_norm_dual_gemm_single_kernel",
+    "fused_rms_norm_gemm_silu_single_kernel",
 ]
