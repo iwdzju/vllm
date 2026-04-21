@@ -84,6 +84,9 @@ from .qwen3_next import (
     Qwen3NextSparseMoeBlock,
     QwenNextMixtureOfExperts,
 )
+from vllm.model_executor.layers.fla.ops.qwen3_5_fused import (
+    fused_gemm_silu,
+)
 from .qwen3_vl import (
     Qwen3_VisionTransformer,
     Qwen3VLDummyInputsBuilder,
@@ -103,6 +106,59 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+class Qwen3_5FusedMLP(torch.nn.Module):
+    """融合版本的MLP，将gate_up_proj + silu_and_mul融合"""
+    
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config=None,
+        reduce_results: bool = True,
+        prefix: str = "",
+        use_fused: bool = True,
+    ):
+        super().__init__()
+        from vllm.model_executor.layers.linear import (
+            MergedColumnParallelLinear,
+            RowParallelLinear,
+        )
+        
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            reduce_results=reduce_results,
+            prefix=f"{prefix}.down_proj",
+        )
+        
+        if hidden_act != "silu":
+            raise ValueError(f"Unsupported activation: {hidden_act}")
+        
+        self.use_fused = use_fused
+        self.intermediate_size = intermediate_size
+    
+    def forward(self, x):
+        gate_up, _ = self.gate_up_proj(x)
+        
+        intermediate_out_size = self.intermediate_size
+        gate = gate_up[:, :intermediate_out_size]
+        up = gate_up[:, intermediate_out_size:]
+        out = torch.nn.functional.silu(gate) * up
+        
+        out, _ = self.down_proj(out)
+        return out
 
 
 class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):
@@ -159,12 +215,13 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 prefix=f"{prefix}.mlp",
             )
         elif config.model_type == "qwen3_5_text":
-            self.mlp = Qwen3NextMLP(
+            self.mlp = Qwen3_5FusedMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                use_fused=True,
             )
         else:
             raise ValueError(f"Invalid model_type {config.model_type}")

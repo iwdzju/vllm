@@ -18,6 +18,8 @@ from .qwen3_5_fused import (
     fused_rms_norm_gemm_silu,
     fused_rms_norm_dual_gemm_single_kernel,
     fused_rms_norm_gemm_silu_single_kernel,
+    fused_dual_gemm,
+    fused_gemm_silu,
 )
 
 __all__ = [
@@ -30,4 +32,6 @@ __all__ = [
     "fused_rms_norm_gemm_silu",
     "fused_rms_norm_dual_gemm_single_kernel",
     "fused_rms_norm_gemm_silu_single_kernel",
+    "fused_dual_gemm",
+    "fused_gemm_silu",
 ]

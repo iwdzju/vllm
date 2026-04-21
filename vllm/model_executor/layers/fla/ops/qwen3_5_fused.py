@@ -326,9 +326,57 @@ def fused_rms_norm_gemm_silu_single_kernel(
     return out
 
 
+def fused_dual_gemm(
+    x: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Dual GEMM融合（不含RMSNorm）
+    用于GDN层的两个投影融合
+    
+    Args:
+        x: 输入tensor (N, hidden_size)，已经normed
+        w1: 第一个权重矩阵 (hidden_size, out1_size)
+        w2: 第二个权重矩阵 (hidden_size, out2_size)
+    
+    Returns:
+        out1: 第一个输出 (N, out1_size)
+        out2: 第二个输出 (N, out2_size)
+    """
+    out1 = torch.matmul(x, w1)
+    out2 = torch.matmul(x, w2)
+    return out1, out2
+
+
+def fused_gemm_silu(
+    x: torch.Tensor,
+    w: torch.Tensor,
+) -> torch.Tensor:
+    """
+    GEMM + SiluAndMul融合（不含RMSNorm）
+    用于MLP层的融合
+    
+    Args:
+        x: 输入tensor (N, hidden_size)，已经normed
+        w: gate_up权重 (hidden_size, intermediate_size)
+    
+    Returns:
+        out: 输出 (N, intermediate_size // 2)
+    """
+    gate_up = torch.matmul(x, w)
+    output_size = gate_up.shape[-1] // 2
+    gate = gate_up[:, :output_size]
+    up = gate_up[:, output_size:]
+    out = torch.nn.functional.silu(gate) * up
+    return out
+
+
 __all__ = [
     "fused_rms_norm_dual_gemm",
     "fused_rms_norm_gemm_silu",
     "fused_rms_norm_dual_gemm_single_kernel",
     "fused_rms_norm_gemm_silu_single_kernel",
+    "fused_dual_gemm",
+    "fused_gemm_silu",
 ]
