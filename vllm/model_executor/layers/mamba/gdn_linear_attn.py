@@ -230,6 +230,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         prefix: str = "",
         create_in_proj_qkvz: bool = True,
         gqa_interleaved_layout=False,
+        use_fused_projection: bool = False,
     ) -> None:
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -259,6 +260,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             else 0
         )
         self.gqa_interleaved_layout = gqa_interleaved_layout
+        self.use_fused_projection = use_fused_projection
 
         # QKV
         self.conv_dim = self.key_dim * 2 + self.value_dim
@@ -510,6 +512,32 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             b, a = ba.chunk(2, dim=-1)
             b = b.contiguous()
             a = a.contiguous()
+        elif self.use_fused_projection and self.tp_size == 1:
+            # Fused projection path (single GPU only)
+            # Combine in_proj_qkvz and in_proj_ba into fused computation
+            w_qkvz = self.in_proj_qkvz.weight
+            w_ba = self.in_proj_ba.weight
+            
+            # Use torch.nn.functional.linear for consistent behavior
+            mixed_qkvz = torch.nn.functional.linear(hidden_states, w_qkvz)
+            ba = torch.nn.functional.linear(hidden_states, w_ba)
+            
+            if self.gqa_interleaved_layout:
+                query, key, value, z, b, a = self.fix_query_key_value_ordering(
+                    mixed_qkvz, ba
+                )
+                query, key, value = map(
+                    lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
+                )
+                mixed_qkv = torch.cat((query, key, value), dim=-1)
+            else:
+                qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+                z_size = self.value_dim // self.tp_size
+                mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
+                z = z.reshape(z.size(0), -1, self.head_v_dim)
+                b, a = ba.chunk(2, dim=-1)
+                b = b.contiguous()
+                a = a.contiguous()
         else:
             mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
             ba, _ = self.in_proj_ba(hidden_states)

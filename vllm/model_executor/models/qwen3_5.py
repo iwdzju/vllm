@@ -195,6 +195,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
                 create_in_proj_qkvz=vllm_config.lora_config is None,
+                use_fused_projection=True,
             )
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen3NextAttention(
