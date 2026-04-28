@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fla.ops import (
 from vllm.model_executor.layers.fla.ops import (
     fused_recurrent_gated_delta_rule_packed_decode,
     fused_sigmoid_gating_delta_rule_update,
+    fused_rms_norm_gated_gemm,
 )
 from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
 from vllm.model_executor.layers.layernorm import RMSNormGated
@@ -231,6 +232,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         create_in_proj_qkvz: bool = True,
         gqa_interleaved_layout=False,
         use_fused_projection: bool = False,
+        use_fused_output: bool = False,
     ) -> None:
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -261,6 +263,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         )
         self.gqa_interleaved_layout = gqa_interleaved_layout
         self.use_fused_projection = use_fused_projection
+        self.use_fused_output = use_fused_output
 
         # QKV
         self.conv_dim = self.key_dim * 2 + self.value_dim
@@ -583,14 +586,34 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        z_shape_og = z.shape
-        # Reshape input data into 2D tensor
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
-        output[:num_tokens], _ = self.out_proj(core_attn_out)
+        if self.use_fused_output and self.tp_size == 1:
+            # Fused output path (single GPU only)
+            # Combine norm + gating + GEMM
+            z_shape_og = z.shape
+            num_tokens_actual = z_shape_og[0] if len(z_shape_og) == 3 else z.size(0)
+            
+            core_attn_out_2d = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+            z_2d = z.reshape(-1, z.shape[-1])
+            
+            fused_out = fused_rms_norm_gated_gemm(
+                x=core_attn_out_2d,
+                z=z_2d,
+                norm_weight=self.norm.weight,
+                gemm_weight=self.out_proj.weight,
+                num_tokens=num_tokens_actual,
+                value_dim=self.value_dim,
+                variance_epsilon=self.layer_norm_epsilon,
+            )
+            output[:num_tokens] = fused_out
+        else:
+            # Original path
+            z_shape_og = z.shape
+            core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+            z = z.reshape(-1, z.shape[-1])
+            core_attn_out = self.norm(core_attn_out, z)
+            core_attn_out = core_attn_out.reshape(z_shape_og)
+            core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
+            output[:num_tokens], _ = self.out_proj(core_attn_out)
 
     def _warmup_prefill_kernels(self, mixed_qkv: torch.Tensor) -> None:
         """Warm up GDN prefill kernels during V1 profiling.

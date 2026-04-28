@@ -372,6 +372,86 @@ def fused_gemm_silu(
     return out
 
 
+def fused_rms_norm_gated_gemm(
+    x: torch.Tensor,
+    z: torch.Tensor,
+    norm_weight: torch.Tensor,
+    gemm_weight: torch.Tensor,
+    num_tokens: int,
+    value_dim: int,
+    variance_epsilon: float = 1e-6,
+) -> torch.Tensor:
+    """
+    融合函数: RMSNorm + Gating (silu) + Reshape + GEMM
+    用于GDN层输出投影
+    
+    Args:
+        x: core_attn_out (num_tokens * num_heads, head_dim) 已经reshape
+        z: gate tensor (num_tokens * num_heads, head_dim) 已经reshape
+        norm_weight: RMSNorm权重 (head_dim,)
+        gemm_weight: out_proj权重 (hidden_size, value_dim), 需要转置
+        num_tokens: token数量
+        value_dim: value维度 (num_heads * head_dim)
+        variance_epsilon: RMSNorm epsilon
+    
+    Returns:
+        out: 输出 (num_tokens, hidden_size)
+    """
+    orig_dtype = x.dtype
+    
+    # RMSNorm (与原始实现一致)
+    x_float = x.float()
+    variance = x_float.pow(2).mean(dim=-1, keepdim=True)
+    x_normed = x_float * torch.rsqrt(variance + variance_epsilon)
+    x_normed = x_normed.to(orig_dtype) * norm_weight
+    
+    # Gating: silu在float上计算，然后转回dtype
+    z_float = z.float()
+    z_silu = torch.nn.functional.silu(z_float).to(orig_dtype)
+    gated = x_normed * z_silu
+    
+    # Reshape: (num_tokens * num_heads, head_dim) -> (num_tokens, value_dim)
+    flattened = gated.view(num_tokens, value_dim)
+    
+    # GEMM: weight is (hidden_size, value_dim), need transpose
+    out = torch.matmul(flattened, gemm_weight.T)
+    
+    return out
+
+
+def fused_rms_norm_gated_gemm_single_kernel(
+    x: torch.Tensor,
+    z: torch.Tensor,
+    norm_weight: torch.Tensor,
+    gemm_weight: torch.Tensor,
+    num_tokens: int,
+    value_dim: int,
+    variance_epsilon: float = 1e-6,
+) -> torch.Tensor:
+    """
+    单kernel版本的融合（避免中间存储）
+    
+    使用torch.compile可以自动优化此函数
+    
+    Args:
+        gemm_weight: (hidden_size, value_dim), 需要转置
+    """
+    orig_dtype = x.dtype
+    
+    x_float = x.float()
+    variance = x_float.pow(2).mean(dim=-1, keepdim=True)
+    x_normed = x_float * torch.rsqrt(variance + variance_epsilon)
+    x_normed = x_normed.to(orig_dtype) * norm_weight
+    
+    z_silu = torch.nn.functional.silu(z)
+    gated = x_normed * z_silu
+    
+    flattened = gated.view(num_tokens, value_dim)
+    
+    # weight is (hidden_size, value_dim), need transpose
+    return torch.matmul(flattened, gemm_weight.T)
+
+
 __all__ = [
     "fused_rms_norm_dual_gemm",
     "fused_rms_norm_gemm_silu",
@@ -379,4 +459,6 @@ __all__ = [
     "fused_rms_norm_gemm_silu_single_kernel",
     "fused_dual_gemm",
     "fused_gemm_silu",
+    "fused_rms_norm_gated_gemm",
+    "fused_rms_norm_gated_gemm_single_kernel",
 ]
